@@ -65,6 +65,9 @@
   - Confidence-based re-prompting: if SAM2 mask confidence drops, trigger unscheduled keyframe.
   - Periodic re-anchoring: force heavy-model keyframe every K frames to bound propagation drift.
 
+**5. Instance ID assignment and tracking:**
+- After Mask2Former outputs on keyframes and SAM2 propagates, assign persistent instance IDs to each connected component. Track these IDs across frames. Output format: per-frame instance masks with (instance_id, class_label, confidence) metadata.
+
 **5. 3D reconstruction and mask projection:**
 - **Dual reconstruction strategy:**
   - COLMAP/MVS for measurement-grade geometry (crack width quantification, ±1–4 mm with GCPs).
@@ -92,9 +95,57 @@
 - Exact keyframe overlap threshold (60–70% target, needs empirical validation).
 - Single-model vs. ensemble: train Mask2Former first, add CrackMamba only if time permits.
 - Multi-class propagation strategy: per-class (N× SAM2 calls) vs. mask-level identity tracking (needs implementation testing).
+- **Primary architecture choice: Mask2Former vs. HrSegNet vs. CrackMamba (critical decision pending).**
+
+### Architecture selection — open decision requiring empirical validation
+
+**Three candidate architectures under consideration:**
+
+1. **Mask2Former + ConvNeXt-L (or EVA-02-L):**
+   - **Advantage:** DACL10k SOTA (0.51 mIoU, dacl-challenge winner). Validated multi-class performance. Well-documented (Detectron2/MMSegmentation). Query-based set-prediction naturally handles multi-label overlaps.
+   - **Concern:** Encoder bottleneck at 1/4 resolution. Challenge winner had weak Crack/Cavity classes, though actual per-class metrics are not available. Assumes skeleton losses compensate for resolution loss.
+   - **Risk level:** Low (proven recipe, known performance ceiling).
+
+2. **HrSegNet:**
+   - **Advantage:** Maintains 1/2 resolution main path (vs. 1/4 for Mask2Former). Explicitly designed for thin cracks. Validated on RCD crack benchmark (82% mIoU, beats HRNet/SegFormer/DeepLabV3+). Lightweight (5-30M params, faster training iteration).
+   - **Concern:** No DACL10k multi-class validation. Designed for single-class cracks, needs multi-label adaptation (sigmoid+BCE). Unknown if 1/2-resolution advantage overcomes Mask2Former's query-based decoder on multi-class. RCD dataset is for Road Cracks, might be different from bridge cracks.
+   - **Risk level:** Medium (first to validate on DACL10k multi-class, but open code and mature 2023 paper).
+
+3. **CrackMamba:**
+   - **Advantage:** SOTA on CrackSeg9k and SewerCrack crack benchmarks. Serpentine scan bakes topology preservation into architecture (no separate skeleton loss needed). VMambaV2 encoder optimized for tubular structures.
+   - **Concern:** No DACL10k multi-class validation. Crack-specialist — would require second model for non-crack classes (two-model merging complexity). Newest architecture (2024), less ecosystem maturity than CNNs/Transformers.
+   - **Risk level:** Medium-high (newest, Mamba less adopted, no multi-class validation).
+
+**Core tradeoff:**
+- **Mask2Former:** Validation breadth (multi-class SOTA) vs. task-specific design (not optimized for cracks).
+- **HrSegNet:** Task-specific design (crack-optimized, 1/2 resolution) vs. validation breadth (no multi-class baseline).
+- **CrackMamba:** Strongest crack-specific evidence vs. highest architectural complexity (two-model split required).
+
+**Key unknown:** Per-class breakdown of dacl-challenge winner's 0.51 mIoU not published. We know Crack/Cavity were weakest classes across all submissions, but don't know if winner's crack performance was strong or if they won on area classes despite weak cracks.
+
+**Proposed decision strategy (risk-managed):**
+1. **Weeks 1-2 of training phase:** Train HrSegNet on DACL10k multi-class with sigmoid+BCE multi-label head + morphology-aware per-class losses (Skeleton Recall + Focal-Tversky). Evaluate on DACL10k val/test, report per-class IoU (especially Crack/Cavity/ExposedRebars).
+2. **Decision point:**
+   - If HrSegNet mIoU ≥ 0.40 AND Crack IoU ≥ 0.30: Commit to HrSegNet as primary model. Thesis contribution: "Crack-specific architecture matches general-purpose SOTA on multi-class when combined with morphology-aware losses."
+   - If HrSegNet mIoU < 0.40 OR multi-class performance weak: Switch to Mask2Former + ConvNeXt-L. Thesis contribution: "Validated that general-purpose SOTA outperforms task-specific architecture on multi-class, confirming challenge winner's choice."
+3. **Either outcome is defensible** — the empirical comparison itself is a contribution (first HrSegNet validation on DACL10k multi-class).
+4. **CrackMamba reserved as optional ensemble member** if time permits after primary model training.
+
+**Rationale for HrSegNet-first approach:**
+- Faster training (5-30M params vs. 100-220M) → find out early if it works, pivot if needed.
+- Novel empirical result (HrSegNet on DACL10k multi-class not published).
+- De-risks timeline (doesn't lock into underperforming architecture).
+- Both outcomes (HrSegNet works / doesn't work) are thesis-defensible research findings.
+
+**Alternative framing if advisor prioritizes DACL10k baseline:** Start with Mask2Former (safest path to 0.45-0.50 mIoU), add HrSegNet as lightweight comparison/ablation if time permits.
+
+**Dependency on thesis success criterion:**
+- "Reach competitive DACL10k mIoU + demonstrate end-to-end pipeline" → Mask2Former (safest).
+- "Maximize crack-class IoU for structural criticality" → HrSegNet or CrackMamba.
+- "Validate crack-specific architectures on multi-class tasks" → HrSegNet-first with Mask2Former fallback (research question).
 
 ### Next steps
 1. **Complete state-of-the-art survey (Task 2):** Finish international bridge inspection standards comparison document (AASHTO MBEI 2019 + SNBI 2022, German DIN 1076, Italian LG2020, Japan MLIT, Ontario OSIM). Partial search results already gathered; synthesis document pending.
-2. **Dataset definition (Task 3):** Finalize DACL10k + auxiliary datasets strategy; acquire synth-dacl, OmniCrack30k, S2DS, CODEBRIM.
+2. **Dataset definition (Task 3):** Finalize DACL10k + auxiliary datasets strategy; acquire synth-dacl, OmniCrack30k, S2DS, CODEBRIM, MBDD2025.
 3. **Baseline reproduction:** Reproduce PoC DeepLabV3+ baseline on DACL10k subset with multi-label head to establish improvement delta from PoC's 0.31 mIoU.
 4. **Mask2Former training (Task 4):** Implement morphology-aware per-class losses; train on DACL10k; target single-model 0.42–0.46 mIoU.
